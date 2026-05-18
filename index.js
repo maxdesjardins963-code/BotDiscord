@@ -491,11 +491,13 @@ async function checkGiveaways() {
                         const embedFin = EmbedBuilder.from(message.embeds[0]).setDescription(`⚡ **Lot :** \`${g.prize}\`\n👑 **Gagnant(s) :** ${gagnantsChoisis.join(', ')}`);
                         await message.edit({ embeds: [embedFin], components: [] });
                     }
-                    channel.send(`🎉 Félicitations à ${gagnantsChoisis.join(', ')} qui remporte(nt) **${g.prize}** !`);
-                }
-            }
-            delete bdd.giveaways[id];
-            sauvegarderDonnees();
+                  channel.send(`🎉 Félicitations à ${gagnantsChoisis.join(', ')} qui remporte(nt) **${g.prize}** !`);
+    }
+  }
+  delete bdd.giveaways[id];
+  sauvegarderDonnees();
+    }
+  }
 }
 
 client.login(process.env.TOKEN);
