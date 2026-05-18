@@ -495,7 +495,7 @@ async function checkGiveaways() {
                 }
             }
             delete bdd.giveaways[id];
-      sauvegarderDonnees();
+            sauvegarderDonnees();
 }
 
 client.login(process.env.TOKEN);
