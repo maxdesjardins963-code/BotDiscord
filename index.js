@@ -498,6 +498,5 @@ async function checkGiveaways() {
             sauvegarderDonnees();
         }
     }
-}
-
 client.login(process.env.TOKEN);
+    
