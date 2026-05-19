@@ -1,3 +1,7 @@
+const express = require('express');
+const app = express();
+app.get('/', (req, res) => res.send('Bot en ligne !'));
+app.listen(process.env.PORT || 10000);
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, InteractionType, PermissionFlagsBits } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
