@@ -25,23 +25,64 @@ if (fs.existsSync(dbPath)) db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
 function saveDB() { fs.writeFileSync(dbPath, JSON.stringify(db, null, 4)); }
 function initUser(id) { if (!db.users[id]) { db.users[id] = { points: 0 }; saveDB(); } }
 
-// --- DÉFINITION DES COMMANDES ---
+// --- DÉFINITION DES COMMANDES (CORRIGÉES) ---
 const commands = [
-    new SlashCommandBuilder().setName('ban').setDescription('[MOD] Bannir un membre').addUserOption(o=>o.setName('cible').setRequired(true)).addStringOption(o=>o.setName('raison')),
-    new SlashCommandBuilder().setName('kick').setDescription('[MOD] Expulser').addUserOption(o=>o.setName('cible').setRequired(true)).addStringOption(o=>o.setName('raison')),
-    new SlashCommandBuilder().setName('mute').setDescription('[MOD] Mute 1h').addUserOption(o=>o.setName('cible').setRequired(true)).addStringOption(o=>o.setName('raison')),
-    new SlashCommandBuilder().setName('panel').setDescription('[ADMIN] Ouvrir le guide Nexro'),
-    new SlashCommandBuilder().setName('gcreate').setDescription('[ADMIN] Créer Giveaway').addStringOption(o=>o.setName('lot').setRequired(true)).addStringOption(o=>o.setName('duree').setRequired(true)).addIntegerOption(o=>o.setName('prix').setRequired(true)),
-    new SlashCommandBuilder().setName('addpoints').setDescription('[ADMIN] Donner des points').addUserOption(o=>o.setName('cible').setRequired(true)).addIntegerOption(o=>o.setName('montant').setRequired(true)),
-    new SlashCommandBuilder().setName('loto').setDescription('Tenter sa chance (50 pts)').addIntegerOption(o=>o.setName('numero').setRequired(true).setMinValue(1).setMaxValue(100)),
-    new SlashCommandBuilder().setName('points').setDescription('Voir ses points').addUserOption(o=>o.setName('cible'))
+    new SlashCommandBuilder()
+        .setName('ban')
+        .setDescription('[MOD] Bannir un membre')
+        .addUserOption(o => o.setName('cible').setDescription('Le membre à bannir').setRequired(true))
+        .addStringOption(o => o.setName('raison').setDescription('La raison du bannissement').setRequired(false)),
+        
+    new SlashCommandBuilder()
+        .setName('kick')
+        .setDescription('[MOD] Expulser un membre')
+        .addUserOption(o => o.setName('cible').setDescription('Le membre à expulser').setRequired(true))
+        .addStringOption(o => o.setName('raison').setDescription("La raison de l'expulsion").setRequired(false)),
+        
+    new SlashCommandBuilder()
+        .setName('mute')
+        .setDescription('[MOD] Mute un membre pour 1 heure')
+        .addUserOption(o => o.setName('cible').setDescription('Le membre à rendre muet').setRequired(true))
+        .addStringOption(o => o.setName('raison').setDescription('La raison du mute').setRequired(false)),
+        
+    new SlashCommandBuilder()
+        .setName('panel')
+        .setDescription('[ADMIN] Ouvrir le guide Nexro'),
+        
+    new SlashCommandBuilder()
+        .setName('gcreate')
+        .setDescription('[ADMIN] Créer un Giveaway avec des points')
+        .addStringOption(o => o.setName('lot').setDescription('Le cadeau à gagner').setRequired(true))
+        .addStringOption(o => o.setName('duree').setDescription('Exemple: 10m, 2h, 1d').setRequired(true))
+        .addIntegerOption(o => o.setName('prix').setDescription('Le coût d’entrée en points').setRequired(true)),
+        
+    new SlashCommandBuilder()
+        .setName('addpoints')
+        .setDescription('[ADMIN] Donner des points à un utilisateur')
+        .addUserOption(o => o.setName('cible').setDescription('Le joueur qui reçoit les points').setRequired(true))
+        .addIntegerOption(o => o.setName('montant').setDescription('Le montant à ajouter').setRequired(true)),
+        
+    new SlashCommandBuilder()
+        .setName('loto')
+        .setDescription('Tenter sa chance pour gagner le jackpot (Mise: 50 pts)')
+        .addIntegerOption(o => o.setName('numero').setDescription('Choisis un chiffre entre 1 et 100').setRequired(true).setMinValue(1).setMaxValue(100)),
+        
+    new SlashCommandBuilder()
+        .setName('points')
+        .setDescription('Voir le solde de points')
+        .addUserOption(o => o.setName('cible').setDescription('L’utilisateur à vérifier (laisser vide pour soi)').setRequired(false))
 ];
 
 // --- ÉVÉNEMENTS ---
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`✅ Nexro Bot est connecté en tant que ${client.user.tag}`);
     const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+    try {
+        await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+        console.log('🚀 Toutes les commandes Slash ont été injectées sur Discord !');
+    } catch (error) {
+        console.error("Erreur lors de l'enregistrement des commandes :", error);
+    }
     setInterval(checkGiveaways, 60000);
 });
 
