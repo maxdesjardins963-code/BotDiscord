@@ -1,507 +1,345 @@
-const express = require('express');
-const app = express();
-app.get('/', (req, res) => res.send('Bot en ligne !'));
-app.listen(process.env.PORT || 10000);
-const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, InteractionType, PermissionFlagsBits } = require('discord.js');
+require('dotenv').config();
+const { 
+    Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, 
+    ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, 
+    REST, Routes, SlashCommandBuilder 
+} = require('discord.js');
 const fs = require('fs');
-const path = require('path');
+const ms = require('ms');
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.GuildMembers
     ]
 });
 
-// Remets ton token sécurisé ici :
-const TOKEN = 'MTUwNTkzNTQ5NDY5MTY4ODU3OQ.Gyw1ze.XK0EkytMT4Egb3bNKCK3re_WbxVXVdyl8IaVTY'; 
+// --- ⚙️ CONFIGURATION ---
+const MOD_ADMIN_ID = '1505953617805312141';   
+const SUPER_ADMIN_ID = '1505953755399454790'; 
+const LOGS_CHANNEL_ID = '1505957112386289674'; 
 
-// --- CONFIGURATIONS DES IDS ---
-const ROLE_MOD_ID = '1505953487404662804';       
-const ROLE_STAFF_ID = '1505953552709845023';     
-const SALON_LOGS_ID = '1505957112386289674';     
+// --- 💾 BASE DE DONNÉES ---
+let db = { users: {}, giveaways: {} };
+const dbPath = './database.json';
 
-const DATA_FILE = path.join(__dirname, 'nexrodata.json');
-let bdd = { users: {}, giveaways: {} };
+if (fs.existsSync(dbPath)) {
+    db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+}
 
-function chargerDonnees() {
-    if (fs.existsSync(DATA_FILE)) {
-        try {
-            bdd = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
-        } catch (e) {
-            console.log("⚠️ Fichier de sauvegarde vide ou corrompu, réinitialisation...");
-        }
+function saveDB() {
+    fs.writeFileSync(dbPath, JSON.stringify(db, null, 4));
+}
+
+function initUser(userId) {
+    if (!db.users[userId]) {
+        db.users[userId] = { points: 0 };
+        saveDB();
     }
 }
-function sauvegarderDonnees() {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(bdd, null, 4), 'utf-8');
+
+// --- 🛡️ FONCTION LOGS ---
+async function sendLog(guild, action, moderator, target, reason) {
+    const logChannel = guild.channels.cache.get(LOGS_CHANNEL_ID);
+    if (!logChannel) return;
+
+    const embed = new EmbedBuilder()
+        .setTitle(`🛑 Action de Modération : ${action}`)
+        .setColor(action === 'Ban' ? '#ff0000' : action === 'Kick' ? '#ffaa00' : '#ffff00')
+        .addFields(
+            { name: '👤 Cible', value: `${target} (${target.id})`, inline: true },
+            { name: '👮 Modérateur', value: `${moderator} (${moderator.id})`, inline: true },
+            { name: '📝 Raison', value: reason || 'Aucune raison fournie', inline: false }
+        )
+        .setTimestamp();
+
+    await logChannel.send({ embeds: [embed] });
 }
 
-let miniGiveawayEnCours = false;
-let reponsesMiniGiveaway = new Map(); 
-const cooldownsMessages = new Map();
+// --- 📜 DEFINITION DES COMMANDES SLASH ---
+const commands = [
+    new SlashCommandBuilder()
+        .setName('ban').setDescription('[MOD] Bannir un utilisateur')
+        .addUserOption(o => o.setName('cible').setDescription('L\'utilisateur à bannir').setRequired(true))
+        .addStringOption(o => o.setName('raison').setDescription('Raison du ban').setRequired(false)),
+    new SlashCommandBuilder()
+        .setName('kick').setDescription('[MOD] Expulser un utilisateur')
+        .addUserOption(o => o.setName('cible').setDescription('L\'utilisateur à expulser').setRequired(true))
+        .addStringOption(o => o.setName('raison').setDescription('Raison du kick').setRequired(false)),
+    new SlashCommandBuilder()
+        .setName('mute').setDescription('[MOD] Rendre muet un utilisateur (1h par défaut)')
+        .addUserOption(o => o.setName('cible').setDescription('L\'utilisateur à mute').setRequired(true))
+        .addStringOption(o => o.setName('raison').setDescription('Raison du mute').setRequired(false)),
+    new SlashCommandBuilder()
+        .setName('panel').setDescription('[ADMIN] Déployer le menu interactif Nexro'),
+    new SlashCommandBuilder()
+        .setName('gcreate').setDescription('[ADMIN] Créer un giveaway payant')
+        .addStringOption(o => o.setName('lot').setDescription('Le cadeau à gagner').setRequired(true))
+        .addStringOption(o => o.setName('duree').setDescription('Durée (ex: 10m, 1h, 1d)').setRequired(true))
+        .addIntegerOption(o => o.setName('prix').setDescription('Prix de participation en Nex Points').setRequired(true)),
+    new SlashCommandBuilder()
+        .setName('addpoints').setDescription('[ADMIN] Donner des Nex Points')
+        .addUserOption(o => o.setName('cible').setDescription('L\'utilisateur').setRequired(true))
+        .addIntegerOption(o => o.setName('montant').setDescription('Nombre de points').setRequired(true)),
+    new SlashCommandBuilder()
+        .setName('loto').setDescription('Jouer au Loto (Coût: 50 Nex Points)')
+        .addIntegerOption(o => o.setName('numero').setDescription('Choisis un nombre entre 1 et 100').setRequired(true).setMinValue(1).setMaxValue(100)),
+    new SlashCommandBuilder()
+        .setName('points').setDescription('Voir son solde ou celui d\'un autre joueur')
+        .addUserOption(o => o.setName('cible').setDescription('L\'utilisateur').setRequired(false))
+];
 
+// --- 🚀 DÉMARRAGE ---
 client.once('ready', async () => {
-    chargerDonnees();
-    console.log(`🛡️🤖 NexroHub Tout-en-un activé sous le nom de ${client.user.tag}!`);
+    console.log(`🤖 Nexro Bot est en ligne (${client.user.tag}) !`);
+    client.user.setActivity('💠 Gérer les Nex Points', { type: 3 });
 
-    const commands = [
-        new SlashCommandBuilder()
-            .setName('nexrohub')
-            .setDescription('Afficher le panel principal de NexroHub'),
-        
-        new SlashCommandBuilder()
-            .setName('setpoints')
-            .setDescription('Donner des NexroPoints à un membre (Rôle Staff requis)')
-            .addUserOption(opt => opt.setName('membre').setDescription('Le membre').setRequired(true))
-            .addIntegerOption(opt => opt.setName('montant').setDescription('Le nombre de points').setRequired(true)),
+    // Enregistrement des commandes Slash direct avec process.env
+    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+    try {
+        console.log('🔄 Actualisation des commandes (/) en cours...');
+        await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+        console.log('✅ Commandes (/) chargées avec succès !');
+    } catch (error) {
+        console.error("Erreur lors de l'actualisation des commandes :", error);
+    }
 
-        new SlashCommandBuilder()
-            .setName('creategiveaway')
-            .setDescription('Lancer un giveaway NexroHub (Rôle Staff requis)')
-            .addStringOption(opt => opt.setName('prix').setDescription('Le lot à gagner').setRequired(true))
-            .addIntegerOption(opt => opt.setName('temps').setDescription('Durée en minutes').setRequired(true))
-            .addIntegerOption(opt => opt.setName('cout').setDescription('Coût de participation en NexroPoints (0 si gratuit)').setRequired(true))
-            .addIntegerOption(opt => opt.setName('gagnants').setDescription('Nombre de gagnants pour ce tirage').setRequired(true)),
-
-        new SlashCommandBuilder()
-            .setName('minigiveaway')
-            .setDescription('Lancer un mini-giveaway express devine le nombre (Rôle Staff requis)')
-            .addStringOption(opt => opt.setName('prix').setDescription('Le lot à gagner').setRequired(true))
-            .addIntegerOption(opt => opt.setName('nombre').setDescription('Le nombre à deviner entre 0 et 100').setRequired(true)),
-
-        new SlashCommandBuilder()
-            .setName('ban')
-            .setDescription('Bannir définitivement un membre du serveur')
-            .addUserOption(opt => opt.setName('membre').setDescription('Le membre à bannir').setRequired(true))
-            .addStringOption(opt => opt.setName('raison').setDescription('Raison du bannissement').setRequired(false)),
-
-        new SlashCommandBuilder()
-            .setName('kick')
-            .setDescription('Expulser un membre du serveur')
-            .addUserOption(opt => opt.setName('membre').setDescription('Le membre à expulser').setRequired(true))
-            .addStringOption(opt => opt.setName('raison').setDescription("Raison de l'expulsion").setRequired(false)),
-
-        new SlashCommandBuilder()
-            .setName('mute')
-            .setDescription('Mettre un membre en sourdine (Timeout)')
-            .addUserOption(opt => opt.setName('membre').setDescription('Le membre à mute').setRequired(true))
-            .addIntegerOption(opt => opt.setName('temps').setDescription('Durée du mute en minutes').setRequired(true))
-            .addStringOption(opt => opt.setName('raison').setDescription('Raison du mute').setRequired(false)),
-
-        new SlashCommandBuilder()
-            .setName('warn')
-            .setDescription('Avertir un membre (Envoie un message privé)')
-            .addUserOption(opt => opt.setName('membre').setDescription('Le membre à avertir').setRequired(true))
-            .addStringOption(opt => opt.setName('raison').setDescription('Raison du warn').setRequired(true)),
-
-        new SlashCommandBuilder()
-            .setName('clear')
-            .setDescription('Supprimer un nombre précis de messages')
-            .addIntegerOption(opt => opt.setName('nombre').setDescription('Nombre de messages à supprimer (Max 100)').setRequired(true)),
-
-        new SlashCommandBuilder()
-            .setName('lock')
-            .setDescription('Verrouiller le salon textuel actuel'),
-
-        new SlashCommandBuilder()
-            .setName('unlock')
-            .setDescription('Déverrouiller le salon textuel actuel')
-    ];
-
-    await client.application.commands.set(commands);
-    setInterval(checkGiveaways, 15000); 
+    setInterval(checkGiveaways, 60000);
 });
 
-client.on('messageCreate', async message => {
-    if (message.author.bot || !message.guild) return;
-
-    if (message.content.startsWith('!hack')) {
-        if (!message.member.roles.cache.has(ROLE_MOD_ID)) {
-            return message.reply("❌ Tu n'as pas le rôle requis pour utiliser le panel de piratage.");
-        }
-
-        const cible = message.mentions.users.first();
-        if (!cible) return message.reply("❌ Tu dois mentionner un membre à pirater ! Exemple : `!hack @Nexro` 🛰️");
-
-        const msgHack = await message.channel.send(`🛰️ **[PANEL DE PIRATAGE NEXPANEL v3.4]**\nCible verrouillée : ${cible}\n\n🔄 Connexion...`);
-        
-        setTimeout(async () => {
-            await msgHack.edit(`🛰️ **[PANEL DE PIRATAGE NEXPANEL v3.4]**\nCible verrouillée : ${cible}\n\n✅ Connexion...\n🌐 IP trouvée : \`192.168.${Math.floor(Math.random() * 254)}.${Math.floor(Math.random() * 254)}\``);
-        }, 2000);
-
-        setTimeout(async () => {
-            await msgHack.edit(`🛰️ **[PANEL DE PIRATAGE NEXPANEL v3.4]**\nCible verrouillée : ${cible}\n\n✅ Connexion...\n✅ IP trouvée...\n🔑 Discord token trouvé : \`MTU${Math.random().toString(36).substring(2, 15)}...XXXXXXXX\``);
-        }, 4500);
-
-        setTimeout(async () => {
-            await msgHack.edit(`🛰️ **[PANEL DE PIRATAGE NEXPANEL v3.4]**\nCible verrouillée : ${cible}\n\n✅ Connexion...\n✅ IP trouvée...\n✅ Discord token trouvé...\n\n💀 **Ceci était une blague.**`);
-        }, 7000);
-
-        return; 
-    }
-
-    const userId = message.author.id;
-    const now = Date.now();
-    const todayStr = new Date().toISOString().split('T')[0];
-
-    if (!bdd.users[userId]) {
-        bdd.users[userId] = { points: 0, xp: 0, level: 1, last_image_date: null, messages: 0, images: 0 };
-    }
-
-    let user = bdd.users[userId];
-    let pointsGagnesCeMessage = 0;
-    let aGagneQuelqueChose = false;
-
-    const aDesImages = message.attachments.size > 0;
-    if (aDesImages && user.last_image_date !== todayStr) {
-        pointsGagnesCeMessage += 10;
-        user.images += 1;
-        user.last_image_date = todayStr;
-        aGagneQuelqueChose = true;
-    }
-
-    const dernierGainMessage = cooldownsMessages.get(userId) || 0;
-    if (now - dernierGainMessage >= 600000) { 
-        pointsGagnesCeMessage += 10;
-        user.messages += 1;
-        cooldownsMessages.set(userId, now); 
-        
-        const xpGagne = Math.floor(Math.random() * 10) + 10;
-        user.xp += xpGagne;
-
-        const xpNecessaire = user.level * 100;
-        if (user.xp >= xpNecessaire) {
-            user.xp -= xpNecessaire;
-            user.level += 1;
-            message.channel.send(`✨ **LEVEL UP** ! ${message.author} passe au niveau **${user.level}** !`);
-        }
-        aGagneQuelqueChose = true;
-    }
-
-    if (aGagneQuelqueChose) {
-        user.points += pointsGagnesCeMessage;
-        sauvegarderDonnees();
-    }
-});
-
+// --- 💬 GESTION DES INTERACTIONS ---
 client.on('interactionCreate', async interaction => {
-    const userId = interaction.user.id;
-
+    // 1. COMMANDES SLASH
     if (interaction.isChatInputCommand()) {
-        const { commandName, options, guild, channel } = interaction;
+        const { commandName, options, user } = interaction;
+        
+        initUser(user.id);
 
-        const envoyerLog = (action, cible, moderateur, raison, détails = null) => {
-            const logChannel = guild.channels.cache.get(SALON_LOGS_ID);
-            if (!logChannel) return;
-            const embedLog = new EmbedBuilder()
-                .setTitle(`🛡️ Log Modération | ${action}`)
-                .addFields(
-                    { name: '👤 Cible', value: `${cible} (\`${cible.id || cible}\`)`, inline: true },
-                    { name: '👮 Modérateur', value: `${moderateur}`, inline: true },
-                    { name: '📝 Raison', value: `\`${raison}\``, inline: false }
-                )
-                .setColor(action.includes('BAN') || action.includes('KICK') ? '#ff0000' : '#ffaa00')
-                .setTimestamp();
-            if (détails) embedLog.addFields({ name: '📊 Détails', value: détails });
-            logChannel.send({ embeds: [embedLog] });
-        };
+        const isMod = user.id === MOD_ADMIN_ID || user.id === SUPER_ADMIN_ID;
+        const isSuperAdmin = user.id === SUPER_ADMIN_ID;
 
-        const listesMod = ['ban', 'kick', 'mute', 'warn', 'clear', 'lock', 'unlock'];
-        if (listesMod.includes(commandName) && !interaction.member.roles.cache.has(ROLE_MOD_ID)) {
-            return interaction.reply({ content: `❌ Tu n'as pas le rôle requis (<@&${ROLE_MOD_ID}>) pour utiliser les commandes de modération.`, ephemeral: true });
+        // MODÉRATION
+        if (['ban', 'kick', 'mute'].includes(commandName)) {
+            if (!isMod) return interaction.reply({ content: "⛔ Tu n'as pas les permissions.", ephemeral: true });
+            
+            const target = options.getMember('cible');
+            const reason = options.getString('raison') || 'Aucune raison spécifiée';
+
+            if (!target) return interaction.reply({ content: "⚠️ Cet utilisateur n'est pas sur le serveur.", ephemeral: true });
+
+            try {
+                if (commandName === 'ban') {
+                    await target.ban({ reason });
+                    await interaction.reply(`✅ ${target.user.tag} a été banni.`);
+                    sendLog(interaction.guild, 'Ban', user, target.user, reason);
+                } else if (commandName === 'kick') {
+                    await target.kick(reason);
+                    await interaction.reply(`✅ ${target.user.tag} a été expulsé.`);
+                    sendLog(interaction.guild, 'Kick', user, target.user, reason);
+                } else if (commandName === 'mute') {
+                    await target.timeout(60 * 60 * 1000, reason); 
+                    await interaction.reply(`✅ ${target.user.tag} a été mute pour 1 heure.`);
+                    sendLog(interaction.guild, 'Mute', user, target.user, reason);
+                }
+            } catch (err) {
+                interaction.reply({ content: "❌ Impossible de sanctionner cet utilisateur (rôle supérieur au mien ?).", ephemeral: true });
+            }
+            return;
         }
 
-        if (commandName === 'ban') {
-            const cible = options.getMember('membre');
-            const raison = options.getString('raison') || 'Aucune raison fournie';
-            if (!cible || !cible.bannable) return interaction.reply({ content: "❌ Impossible de bannir ce membre.", ephemeral: true });
+        // PANEL
+        if (commandName === 'panel') {
+            if (!isSuperAdmin) return interaction.reply({ content: "⛔ Réservé au Super Admin.", ephemeral: true });
 
-            await cible.ban({ reason: `${interaction.user.tag} : ${raison}` });
-            await interaction.reply({ content: `✅ **${cible.user.tag}** banni.`, ephemeral: true });
-            envoyerLog('BAN', cible.user, interaction.user, raison);
-        }
-
-        if (commandName === 'kick') {
-            const cible = options.getMember('membre');
-            const raison = options.getString('raison') || 'Aucune raison fournie';
-            if (!cible || !cible.kickable) return interaction.reply({ content: "❌ Impossible d'expulser ce membre.", ephemeral: true });
-
-            await cible.kick(`${interaction.user.tag} : ${raison}`);
-            await interaction.reply({ content: `✅ **${cible.user.tag}** expulsé.`, ephemeral: true });
-            envoyerLog('KICK', cible.user, interaction.user, raison);
-        }
-
-        if (commandName === 'mute') {
-            const cible = options.getMember('membre');
-            const temps = options.getInteger('temps');
-            const raison = options.getString('raison') || 'Aucune raison fournie';
-            if (!cible || !cible.moderatable) return interaction.reply({ content: "❌ Impossible de mute ce membre.", ephemeral: true });
-
-            await cible.timeout(temps * 60 * 1000, `${interaction.user.tag} : ${raison}`);
-            await interaction.reply({ content: `✅ **${cible.user.tag}** mute pendant \`${temps} minute(s)\`.`, ephemeral: true });
-            envoyerLog('MUTE', cible.user, interaction.user, raison, `**Durée :** ${temps} minute(s)`);
-        }
-
-        if (commandName === 'warn') {
-            const cible = options.getUser('membre');
-            const raison = options.getString('raison');
-            let mp = true;
-            await cible.send(`⚠️ **Avertissement de ${guild.name}**\n**Raison :** ${raison}`).catch(() => mp = false);
-
-            await interaction.reply({ content: `✅ **${cible.tag}** a été averti.`, ephemeral: true });
-            envoyerLog('WARN', cible, interaction.user, raison);
-        }
-
-        if (commandName === 'clear') {
-            const nombre = options.getInteger('nombre');
-            if (nombre < 1 || nombre > 100) return interaction.reply({ content: "❌ Le nombre doit être entre 1 et 100.", ephemeral: true });
-            if (!channel.permissionsFor(guild.members.me).has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "❌ Permission manquante.", ephemeral: true });
-
-            const supprimes = await channel.bulkDelete(nombre, true).catch(() => null);
-            if (!supprimes) return interaction.reply({ content: "❌ Erreur de suppression.", ephemeral: true });
-
-            await interaction.reply({ content: `🧹 **${supprimes.size} messages** supprimés.`, ephemeral: true });
-            envoyerLog('CLEAR', `Salon <#${channel.id}>`, interaction.user, `Nettoyage`, `**Supprimés :** ${supprimes.size}`);
-        }
-
-        if (commandName === 'lock') {
-            if (!channel.permissionsFor(guild.members.me).has(PermissionFlagsBits.ManageRoles)) return interaction.reply({ content: "❌ Permission manquante.", ephemeral: true });
-            await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false });
-            await interaction.reply({ content: `🔒 Salon verrouillé avec succès.` });
-            envoyerLog('LOCK', `Salon <#${channel.id}>`, interaction.user, `Verrouillage du salon`);
-        }
-
-        if (commandName === 'unlock') {
-            if (!channel.permissionsFor(guild.members.me).has(PermissionFlagsBits.ManageRoles)) return interaction.reply({ content: "❌ Permission manquante.", ephemeral: true });
-            await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null });
-            await interaction.reply({ content: `🔓 Salon déverrouillé avec succès.` });
-            envoyerLog('UNLOCK', `Salon <#${channel.id}>`, interaction.user, `Réouverture du salon`);
-        }
-
-        if (commandName === 'nexrohub') {
             const embed = new EmbedBuilder()
-                .setTitle('👻 NEXRO HUB')
-                .setDescription(`Bienvenue sur le centre de contrôle de l'économie.\n\n💬 **Gagne des NexroPoints :** 10 coins par message (toutes les 10 minutes).\n🖼️ **Bonus Image :** Poste une image pour obtenir 10 coins bonus une fois par jour.\n\n*Clique sur les boutons ci-dessous pour interagir avec ton compte.*`)
-                .setColor('#1a1a1a');
+                .setTitle("📘 GUIDE NEXRO 💠")
+                .setDescription("Bienvenue dans le centre de contrôle Nexro !\n\nIci tu peux apprendre comment fonctionnent les différents systèmes du serveur 🔥\n\nChoisis une catégorie dans le menu ci-dessous pour afficher les explications :")
+                .setColor('#2b2d31')
+                .addFields(
+                    { name: '💠 Gagner des Nex Points', value: 'Découvre comment t\'enrichir', inline: false },
+                    { name: '🎁 Participer aux Giveaways', value: 'Tente ta chance pour gagner du lourd', inline: false }
+                );
 
             const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('hub_points').setLabel('💰 NexroPoints').setStyle(ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId('hub_profil').setLabel('👤 Mon Profil').setStyle(ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId('hub_niveau').setLabel('📈 Mon Niveau').setStyle(ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId('hub_giveaways').setLabel('🎁 Giveaways').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId('hub_stats').setLabel('📜 Historique').setStyle(ButtonStyle.Secondary)
+                new StringSelectMenuBuilder()
+                    .setCustomId('nexro_guide_menu')
+                    .setPlaceholder('Choisir une section du guide')
+                    .addOptions([
+                        { label: 'Gagner des Nex Points', value: 'guide_points', emoji: '💠' },
+                        { label: 'Participer aux Giveaways', value: 'guide_giveaways', emoji: '🎁' },
+                        { label: 'Niveaux & Progression', value: 'guide_niveaux', emoji: '⭐' },
+                    ]),
             );
+
             await interaction.reply({ embeds: [embed], components: [row] });
+            return;
         }
 
-        if (commandName === 'setpoints') {
-            if (!interaction.member.roles.cache.has(ROLE_STAFF_ID)) {
-                return interaction.reply({ content: `❌ Rôle manquant (<@&${ROLE_STAFF_ID}>).`, ephemeral: true });
-            }
-            const cible = options.getUser('membre');
-            const montant = options.getInteger('montant');
+        // GCREATE (GIVEAWAY)
+        if (commandName === 'gcreate') {
+            if (!isSuperAdmin) return interaction.reply({ content: "⛔ Réservé au Super Admin.", ephemeral: true });
 
-            if (!bdd.users[cible.id]) bdd.users[cible.id] = { points: 0, xp: 0, level: 1, last_image_date: null, messages: 0, images: 0 };
-            bdd.users[cible.id].points += montant;
-            sauvegarderDonnees();
-            await interaction.reply({ content: `✅ **${montant} NexroPoints** ajustés pour ${cible}.`, ephemeral: true });
-        }
+            const prize = options.getString('lot');
+            const durationStr = options.getString('duree');
+            const cost = options.getInteger('prix');
 
-        if (commandName === 'creategiveaway') {
-            if (!interaction.member.roles.cache.has(ROLE_STAFF_ID)) {
-                return interaction.reply({ content: `❌ Rôle manquant.`, ephemeral: true });
-            }
-            const prize = options.getString('prix');
-            const temps = options.getInteger('temps');
-            const cost = options.getInteger('cout');
-            const maxWinners = options.getInteger('gagnants');
-            const endsAt = Date.now() + (temps * 60 * 1000);
+            const durationMs = ms(durationStr);
+            if (!durationMs) return interaction.reply({ content: "⚠️ Temps invalide. Utilise 10m, 1h, 1d...", ephemeral: true });
 
-            if (maxWinners < 1) return interaction.reply({ content: "❌ Minimum 1 gagnant.", ephemeral: true });
+            const endTime = Date.now() + durationMs;
+            const giveawayId = `gw_${Date.now()}`;
 
-            const embedGiv = new EmbedBuilder()
-                .setTitle(`🎉 **NEXRO GIVEAWAY** 🎉`)
-                .setDescription(`⚡ **Lot à gagner :** \`${prize}\`\n👥 **Nombre de gagnants :** \`${maxWinners}\`\n💰 **Ticket d'entrée :** \`${cost} NexroPoints\`\n⏳ **Fin du tirage :** <t:${Math.floor(endsAt / 1000)}:R>`)
-                .setColor('#ff0055');
+            const embed = new EmbedBuilder()
+                .setTitle("🎁 Giveaway ouvert")
+                .setDescription(`Participe à ce GIVEAWAY pour tenter de gagner un lot exceptionnel !\n\n--------------------------\n\n🎯 **LOT**\n🍍 **${prize}**\n\n--------------------------\n\n📊 **INFOS**\n👥 Gagnants : **1**\n👥 Participants : **0**\n⏳ Fin : <t:${Math.floor(endTime / 1000)}:R>\n\n--------------------------\n\n💰 **PARTICIPATION**\nCoût : **${cost} Nex Points** 💠`)
+                .setColor('#2b2d31')
+                .setFooter({ text: 'La participation utilise les points requis.' });
 
-            const rowGiv = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('join_giveaway').setLabel('🎉 Rejoindre le Giveaway').setStyle(ButtonStyle.Danger)
-            );
-            
-            const msg = await interaction.reply({ embeds: [embedGiv], components: [rowGiv], fetchReply: true });
-            bdd.giveaways[msg.id] = { prize, cost, endsAt, channelId: interaction.channelId, maxWinners, participants: [] };
-            sauvegarderDonnees();
-        }
-
-        if (commandName === 'minigiveaway') {
-            if (!interaction.member.roles.cache.has(ROLE_STAFF_ID)) {
-                return interaction.reply({ content: `❌ Rôle manquant.`, ephemeral: true });
-            }
-            if (miniGiveawayEnCours) {
-                return interaction.reply({ content: "❌ Un mini-giveaway est déjà en cours !", ephemeral: true });
-            }
-
-            const prix = options.getString('prix');
-            const nombreSecret = options.getInteger('nombre'); // Option corrigée ici !
-
-            if (nombreSecret < 0 || nombreSecret > 100) {
-                return interaction.reply({ content: "❌ Choisi un nombre entre 0 et 100 !", ephemeral: true });
-            }
-            if (!channel.permissionsFor(guild.members.me).has(PermissionFlagsBits.ManageRoles)) {
-                return interaction.reply({ content: "❌ Permission manquante au bot.", ephemeral: true });
-            }
-
-            miniGiveawayEnCours = true;
-            reponsesMiniGiveaway.clear();
-
-            await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false });
-
-            const embedMini = new EmbedBuilder()
-                .setTitle("🛰️ **MINI-GIVEAWAY EXPRESS !** 🛰️")
-                .setDescription(`Le salon a été verrouillé ! J'ai choisi un nombre secret entre **0** et **100**.\n\n🎁 **Lot à gagner :** \`${prix}\`\n⏳ **Temps restant :** \`45 secondes\`\n\n*Clique sur le bouton ci-dessous pour entrer ton chiffre !*`)
-                .setColor('#00ffcc');
-
-            const rowMini = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('btn_devine_nombre').setLabel('🎲 Entrer un nombre').setStyle(ButtonStyle.Success)
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`join_gw_${giveawayId}`)
+                    .setLabel(`Participer • ${cost} points`)
+                    .setEmoji('🟢')
+                    .setStyle(ButtonStyle.Success)
             );
 
-            await interaction.reply({ embeds: [embedMini], components: [rowMini] });
+            const msg = await interaction.reply({ embeds: [embed], components: [row], fetchReply: true });
 
-            setTimeout(async () => {
-                await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null });
+            db.giveaways[giveawayId] = {
+                messageId: msg.id,
+                channelId: interaction.channelId,
+                cost: cost,
+                prize: prize,
+                endTime: endTime,
+                participants: [],
+                ended: false
+            };
+            saveDB();
+            return;
+        }
 
-                let gagnants = [];
-                let plusPetiteDifference = 999;
+        // ADDPOINTS
+        if (commandName === 'addpoints') {
+            if (!isSuperAdmin) return interaction.reply({ content: "⛔ Interdit.", ephemeral: true });
+            const target = options.getUser('cible');
+            const amount = options.getInteger('montant');
 
-                reponsesMiniGiveaway.forEach((nbChoisi, idMembre) => {
-                    const diff = Math.abs(nbChoisi - nombreSecret);
-                    if (diff < plusPetiteDifference) {
-                        plusPetiteDifference = diff;
-                        gagnants = [idMembre];
-                    } else if (diff === plusPetiteDifference) {
-                        gagnants.push(idMembre);
-                    }
-                });
+            initUser(target.id);
+            db.users[target.id].points += amount;
+            saveDB();
+            return interaction.reply(`✅ Ajouté **${amount} Nex Points** à ${target}. (Nouveau solde: ${db.users[target.id].points} 💠)`);
+        }
 
-                const embedResultat = new EmbedBuilder().setTitle("🏁 **FIN DU MINI-GIVEAWAY !** 🏁").setColor('#ffaa00');
+        // POINTS
+        if (commandName === 'points') {
+            const target = options.getUser('cible') || user;
+            initUser(target.id);
+            return interaction.reply(`💳 Solde de ${target.username} : **${db.users[target.id].points} Nex Points** 💠`);
+        }
 
-                if (gagnants.length === 0) {
-                    embedResultat.setDescription(`Le temps est écoulé !\n\n🔢 Le nombre secret était : **${nombreSecret}**\n😢 Personne n'a participé.`);
-                    await channel.send({ embeds: [embedResultat] });
-                } else {
-                    const mentionsGagnants = gagnants.map(id => `<@${id}>`).join(', ');
-                    if (plusPetiteDifference === 0) {
-                        embedResultat.setDescription(`Le temps est écoulé !\n\n🔢 Le nombre secret était bien : **${nombreSecret}**\n👑 **Gagnant(s) (Pile poil !) :** ${mentionsGagnants}\n\n🎁 Tu remportes : **${prix}** !`);
-                    } else {
-                        embedResultat.setDescription(`Le temps est écoulé !\n\n🔢 Le nombre secret était : **${nombreSecret}**\n👑 **Gagnant(s) le plus proche :** ${mentionsGagnants} (Nombre donné: \`${reponsesMiniGiveaway.get(gagnants[0])}\`)\n\n🎁 Tu remportes : **${prix}** !`);
-                    }
-                    await channel.send({ content: `🎉 Félicitations ${mentionsGagnants} !`, embeds: [embedResultat] });
-                }
+        // LOTO
+        if (commandName === 'loto') {
+            const cost = 50;
+            const reward = 5000;
+            const guess = options.getInteger('numero');
 
-                miniGiveawayEnCours = false;
-                reponsesMiniGiveaway.clear();
-            }, 45000);
+            if (db.users[user.id].points < cost) {
+                return interaction.reply({ content: `❌ Tu es fauché ! Il te faut **${cost} Nex Points** pour jouer.`, ephemeral: true });
+            }
+
+            db.users[user.id].points -= cost;
+            saveDB();
+
+            const winningNumber = Math.floor(Math.random() * 100) + 1;
+
+            if (guess === winningNumber) {
+                db.users[user.id].points += reward;
+                saveDB();
+                return interaction.reply(`🎉 **BINGO !** Incroyable ! Le numéro gagnant était bien le **${winningNumber}** ! Tu remportes le jackpot de **${reward} Nex Points** ! 💠`);
+            } else {
+                return interaction.reply(`🎰 Dommage... Tu as parié le **${guess}**, mais le numéro gagnant était le **${winningNumber}**. Tu perds ${cost} points.`);
+            }
         }
     }
 
-    if (interaction.isButton()) {
-        if (!bdd.users[userId]) bdd.users[userId] = { points: 0, xp: 0, level: 1, last_image_date: null, messages: 0, images: 0 };
-        const user = bdd.users[userId];
+    // 2. MENUS DÉROULANTS (PANEL)
+    if (interaction.isStringSelectMenu() && interaction.customId === 'nexro_guide_menu') {
+        const choice = interaction.values[0];
+        let replyText = "";
 
-        if (interaction.customId === 'btn_devine_nombre') {
-            if (!miniGiveawayEnCours) return interaction.reply({ content: "❌ Ce mini-giveaway est terminé !", ephemeral: true });
-            if (reponsesMiniGiveaway.has(userId)) return interaction.reply({ content: "❌ Tu as déjà soumis un nombre !", ephemeral: true });
+        if (choice === 'guide_points') replyText = "**💠 Les Nex Points**\nC'est la monnaie du serveur ! Participe au chat et aux events pour t'enrichir.";
+        else if (choice === 'guide_giveaways') replyText = "**🎁 Giveaways**\nUtilise tes points pour rejoindre des concours incroyables avec `/gcreate` (admins) !";
+        else if (choice === 'guide_niveaux') replyText = "**⭐ Niveaux & Progression**\nPlus tu es actif, plus tu montes en grade et débloques des avantages.";
 
-            const modal = new ModalBuilder().setCustomId('modal_devine').setTitle('Devine le Nombre !');
-            const inputNombre = new TextInputBuilder()
-                .setCustomId('txt_input_nombre').setLabel('Propose un chiffre entre 0 et 100 :').setStyle(TextInputStyle.Short)
-                .setPlaceholder('Ex: 55').setMinLength(1).setMaxLength(3).setRequired(true);
-
-            modal.addComponents(new ActionRowBuilder().addComponents(inputNombre));
-            await interaction.showModal(modal);
-        }
-
-        if (interaction.customId === 'hub_points') await interaction.reply({ content: `💰 Ton solde actuel : **${user.points} NexroPoints**.`, ephemeral: true });
-        
-        if (interaction.customId === 'hub_profil') {
-            const embed = new EmbedBuilder().setTitle(`👤 PROFIL DE ${interaction.user.username.toUpperCase()}`).addFields({ name: '🌟 Niveau', value: `\`Niveau ${user.level}\``, inline: true }, { name: '💰 NexroPoints', value: `\`${user.points} Pts\``, inline: true }).setColor('#00bfff');
-            await interaction.reply({ embeds: [embed], ephemeral: true });
-        }
-        if (interaction.customId === 'hub_niveau') await interaction.reply({ content: `📈 **Niveau ${user.level}** (${user.xp} / ${user.level * 100} XP)`, ephemeral: true });
-        if (interaction.customId === 'hub_stats') await interaction.reply({ content: `📜 **Statistiques :**\n💬 Messages : \`${user.messages}\` | 🖼️ Images : \`${user.images}\``, ephemeral: true });
-        
-        if (interaction.customId === 'hub_giveaways') {
-            let txt = "🎁 **Giveaways actifs :**\n\n"; let c = 0;
-            for (const id in bdd.giveaways) { if (Date.now() < bdd.giveaways[id].endsAt) { txt += `• **${bdd.giveaways[id].prize}** | Entrée : \`${bdd.giveaways[id].cost} Pts\`\n`; c++; } }
-            await interaction.reply({ content: c === 0 ? "Aucun giveaway actif." : txt, ephemeral: true });
-        }
-
-        if (interaction.customId === 'join_giveaway') {
-            const g = bdd.giveaways[interaction.message.id];
-            if (!g || Date.now() > g.endsAt) return interaction.reply({ content: "❌ Ce giveaway est expiré.", ephemeral: true });
-            if (g.participants.includes(userId)) return interaction.reply({ content: "❌ Tu es déjà inscrit !", ephemeral: true });
-            if (user.points < g.cost) return interaction.reply({ content: `❌ Solde insuffisant (\`${g.cost} Pts\` requis).`, ephemeral: true });
-
-            user.points -= g.cost;
-            g.participants.push(userId);
-            sauvegarderDonnees();
-            await interaction.reply({ content: `🎉 Inscription validée ! \`${g.cost} NexroPoints\` débités.`, ephemeral: true });
-        }
+        await interaction.reply({ content: replyText, ephemeral: true });
     }
 
-    if (interaction.type === InteractionType.ModalSubmit) {
-        if (interaction.customId === 'modal_devine') {
-            const valeurEntree = interaction.fields.getTextInputValue('txt_input_nombre');
-            const conversionNombre = parseInt(valeurEntree);
+    // 3. BOUTONS (GIVEAWAY)
+    if (interaction.isButton() && interaction.customId.startsWith('join_gw_')) {
+        const gwId = interaction.customId.replace('join_gw_', '');
+        const gw = db.giveaways[gwId];
 
-            if (isNaN(conversionNombre) || conversionNombre < 0 || conversionNombre > 100) {
-                return interaction.reply({ content: "❌ Tu devez écrire un nombre valide entre 0 et 100 !", ephemeral: true });
-            }
+        if (!gw || gw.ended) return interaction.reply({ content: "❌ Ce giveaway est expiré ou n'existe plus.", ephemeral: true });
 
-            reponsesMiniGiveaway.set(userId, conversionNombre);
-            await interaction.reply({ content: `✅ Ton nombre (**${conversionNombre}**) a été enregistré en secret !`, ephemeral: true });
+        initUser(interaction.user.id);
+
+        if (gw.participants.includes(interaction.user.id)) {
+            return interaction.reply({ content: "Tu participes déjà à ce giveaway ! 🍀", ephemeral: true });
         }
+
+        if (db.users[interaction.user.id].points < gw.cost) {
+            return interaction.reply({ content: `❌ Il te manque des fonds. Il te faut **${gw.cost} Nex Points** pour participer.`, ephemeral: true });
+        }
+
+        db.users[interaction.user.id].points -= gw.cost;
+        gw.participants.push(interaction.user.id);
+        saveDB();
+
+        const oldEmbed = interaction.message.embeds[0];
+        const newEmbed = EmbedBuilder.from(oldEmbed)
+            .setDescription(`Participe à ce GIVEAWAY pour tenter de gagner un lot exceptionnel !\n\n--------------------------\n\n🎯 **LOT**\n🍍 **${gw.prize}**\n\n--------------------------\n\n📊 **INFOS**\n👥 Gagnants : **1**\n👥 Participants : **${gw.participants.length}**\n⏳ Fin : <t:${Math.floor(gw.endTime / 1000)}:R>\n\n--------------------------\n\n💰 **PARTICIPATION**\nCoût : **${gw.cost} Nex Points** 💠`);
+
+        await interaction.message.edit({ embeds: [newEmbed] });
+        await interaction.reply({ content: `✅ Participation validée ! Tu as payé **${gw.cost} Nex Points**. Bonne chance ! 🍀`, ephemeral: true });
     }
 });
 
+// --- ⏲️ VERIFICATION DES GIVEAWAYS ---
 async function checkGiveaways() {
     const now = Date.now();
-    for (const id in bdd.giveaways) {
-        const g = bdd.giveaways[id];
-        if (now >= g.endsAt) {
-            const channel = await client.channels.fetch(g.channelId).catch(() => null);
-            if (channel) {
-                const message = await channel.messages.fetch(id).catch(() => null);
+    for (const gwId in db.giveaways) {
+        const gw = db.giveaways[gwId];
+        if (!gw.ended && now >= gw.endTime) {
+            gw.ended = true;
+            saveDB();
+
+            try {
+                const channel = await client.channels.fetch(gw.channelId);
+                const message = await channel.messages.fetch(gw.messageId);
+
+                if (gw.participants.length === 0) {
+                    await message.reply("😢 Personne n'a participé à ce giveaway...");
+                    continue;
+                }
+
+                const winnerId = gw.participants[Math.floor(Math.random() * gw.participants.length)];
                 
-                if (g.participants.length === 0) {
-                    if (message) {
-                        const embedFin = EmbedBuilder.from(message.embeds[0]).setDescription(`⚡ **Lot :** \`${g.prize}\`\n\n😢 Aucun participant inscrit.`);
-                        await message.edit({ embeds: [embedFin], components: [] });
-                    }
-                } else {
-                    let listeParticipants = [...g.participants];
-                    let gagnantsChoisis = [];
-                    const nbGagnantsVoulus = Math.min(g.maxWinners, listeParticipants.length);
+                const disabledRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId('gw_ended').setLabel('Terminé').setStyle(ButtonStyle.Secondary).setDisabled(true)
+                );
+                
+                const endedEmbed = EmbedBuilder.from(message.embeds[0]).setTitle("🎉 Giveaway Terminé").setColor('#78b159');
 
-                    for (let i = 0; i < nbGagnantsVoulus; i++) {
-                        const randomIndex = Math.floor(Math.random() * listeParticipants.length);
-                        gagnantsChoisis.push(`<@${listeParticipants[randomIndex]}>`);
-                        listeParticipants.splice(randomIndex, 1);
-                    }
+                await message.edit({ embeds: [endedEmbed], components: [disabledRow] });
+                await message.reply(`🎉 Félicitations à <@${winnerId}> qui remporte **${gw.prize}** ! 🎁`);
 
-                    if (message) {
-                        const embedFin = EmbedBuilder.from(message.embeds[0]).setDescription(`⚡ **Lot :** \`${g.prize}\`\n👑 **Gagnant(s) :** ${gagnantsChoisis.join(', ')}`);
-                        await message.edit({ embeds: [embedFin], components: [] });
-                    }
-                  channel.send(`🎉 Félicitations à ${gagnantsChoisis.join(', ')} qui remporte(nt) **${g.prize}** !`);
+            } catch (err) {
+                console.error("Erreur Giveaway:", err);
+            }
+        }
     }
-  }
-  delete bdd.giveaways[id];
-  sauvegarderDonnees();
-    }
-  }
 }
 
+// Connexion directe avec process.env.TOKEN
 client.login(process.env.TOKEN);
